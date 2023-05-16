@@ -1,0 +1,289 @@
+---
+title: "Assignment"
+output: html_notebook
+---
+
+```{r}
+library("dplyr")
+library(ggplot2)
+library(tidyr)
+library(reshape2)
+```
+
+```{r}
+df <- read.csv("clonality_assignment_data.csv") 
+```
+
+```{r}
+### Question 1 ###
+# a
+Simpson_index <- df %>%
+  filter(name_of_visit == 'Visit 1') %>%
+  group_by(cell_type, patient_alias) %>%
+  mutate(cell_n = n()) %>%
+  group_by(TRA_TRB_aa_dataset_clonotype_id) %>%
+  mutate(clontype_n = n(),
+         clontype_p = clontype_n / cell_n) %>%
+  group_by(cell_type) %>%
+  summarise(Simpson_index = 1 - sum(clontype_p ** 2))
+Simpson_index
+
+# Cell types 1,3,4 and 5 have higher Simpson index compared to cell type 2 as it tends to 1,
+# and therefore we can conclude that they are more diverse and enriched by singeltons (although cell type
+# 2 Simpson index is also quite high and also enriched by singletons).
+```
+
+
+```{r}
+#b
+# Sample size effect Simpson's index because it needs to be sufficient in order to get accurate estimates of proportions.
+sample_1 <- df %>%
+  group_by(cell_type, patient_alias, name_of_visit) %>%
+  sample_frac(0.25)
+
+sample_2 <- df %>%
+  group_by(cell_type, patient_alias, name_of_visit) %>%
+  sample_frac(0.5)
+
+simpson_table <- data.frame()
+for (sample in list(sample_1, sample_2)) {
+  Simpson_index_sample <- sample %>%
+    filter(name_of_visit == 'Visit 1') %>%
+    group_by(cell_type, patient_alias) %>%
+    mutate(cell_n = n()) %>%
+    group_by(TRA_TRB_aa_dataset_clonotype_id) %>%
+    mutate(clontype_n = n(),
+           clontype_p = clontype_n / cell_n) %>%
+    group_by(cell_type) %>%
+    summarise(Simpson_index = 1 - sum(clontype_p **
+                                        2))
+  
+  simpson_table <- rbind(simpson_table, Simpson_index_sample)
+}
+
+simpson_table_ <- rbind(simpson_table, Simpson_index)
+simpson_table_final <-
+  cbind(as.character(c(rep(0.25, 5), rep(0.5, 5), rep(1, 5))), simpson_table_)
+colnames(simpson_table_final)[1] <- 'sample_percent'
+
+ggplot(simpson_table_final,
+       aes(fill = cell_type, y = Simpson_index, x = sample_percent)) +
+  geom_bar(position = "dodge", stat = "identity")
+
+```
+
+```{r}
+#c
+#In order to normalize for the effect of sample size, I would divide each cell counts by the total cell's library size #and multiply by a fixed number
+#(for example 10^6), in order to get a standardized value. 
+```
+
+```{r}
+#d
+#Possible biological source might be healthy/diseased conditions and treatment/control conditions.
+#I would test these effects by regressing each clone against both the biological effects that I want to test and its #technical confounders that I
+# want to "clean" their effects. 
+```
+
+```{r}
+### Question 2 ###
+# I choose to include individuals in order to account to dependencies in the data. 
+#a
+clone_abundance <- df %>%
+  group_by(name_of_visit, patient_alias) %>%
+  mutate(cell_n = n()) %>%
+  group_by(name_of_visit,
+           patient_alias,
+           TRA_TRB_aa_dataset_clonotype_id) %>%
+  mutate(clontype_n = n(),
+         clontype_p = clontype_n / cell_n) %>%
+  summarise(
+    clontype_p = max(clontype_p),
+    cell_n = max(cell_n),
+    clontype_n = max(clontype_n)
+  ) %>%
+  arrange(desc(clontype_p)) %>%
+  mutate(row_id = 1:n(),
+         group_id = paste(patient_alias, "_", name_of_visit))
+
+clone_abundance_plot <-
+  ggplot(data = clone_abundance,
+         aes(
+           x = row_id,
+           y = clontype_p,
+           group = group_id,
+           color = group_id
+         )) +
+  geom_line() +
+  xlab("rank") + ylab("proportion of abundance")
+clone_abundance_plot
+
+# The plot displays for each individual at each visit, the proportion of each of 
+# its clones from the most abundant to the least abundant clone. We can see that the vast majority of the clones 
+# among all individuals and visits have a uniform and a very low abundance.
+
+```
+
+```{r}
+#b
+clone_abundance_wide = dcast(
+  melt(
+    select(clone_abundance,-c("row_id", "group_id")),
+    id.vars = c(
+      "patient_alias",
+      "TRA_TRB_aa_dataset_clonotype_id",
+      "name_of_visit"
+    )
+  ),
+  patient_alias + TRA_TRB_aa_dataset_clonotype_id ~ name_of_visit + variable
+)
+
+colnames(clone_abundance_wide)[3:8] = c(
+  "Visit_1_clontype_p",
+  "Visit_1_cell_n",
+  "Visit_1_clontype_n",
+  "Visit_2_clontype_p",
+  "Visit_2_cell_n",
+  "Visit_2_clontype_n"
+)
+clone_abundance_wide$RR = clone_abundance_wide$Visit_2_clontype_p / clone_abundance_wide$Visit_1_clontype_p
+
+clone_abundance_wide =
+  clone_abundance_wide %>% mutate(
+    clone_class_1 =
+      case_when(
+        RR > 1.2 |
+          (is.na(Visit_1_clontype_p) &
+             !is.na(Visit_2_clontype_p)) ~ 'expanding',
+        (!is.na(RR) &
+           RR < 0.8) |
+          (!is.na(Visit_1_clontype_p) &
+             is.na(Visit_2_clontype_p))  ~ 'contracting',
+        RR >=
+          0.8 & RR <= 1.2 ~ 'persistent'
+      ),
+    clone_class_2 = case_when(
+      RR > 1.1 |
+        (is.na(Visit_1_clontype_p) &
+           !is.na(Visit_2_clontype_p)) ~ 'expanding',
+      (!is.na(RR) &
+         RR < 0.9) |
+        (!is.na(Visit_1_clontype_p) &
+           is.na(Visit_2_clontype_p))  ~ 'contracting',
+      RR >=
+        0.9 & RR <= 1.1 ~ 'persistent'
+    ),
+    clone_class_3 = case_when(
+      RR > 1.5 |
+        (is.na(Visit_1_clontype_p) &
+           !is.na(Visit_2_clontype_p)) ~ 'expanding',
+      (!is.na(RR) &
+         RR < 0.5) |
+        (!is.na(Visit_1_clontype_p) &
+           is.na(Visit_2_clontype_p))  ~ 'contracting',
+      RR >=
+        0.5 & RR <= 1.5 ~ 'persistent'
+    )
+  )
+
+clone_abundance_long_1 = melt(
+  clone_abundance_wide[c(
+    "patient_alias",
+    "TRA_TRB_aa_dataset_clonotype_id",
+    "clone_class_1",
+    "clone_class_2",
+    "clone_class_3"
+  )],
+  id.vars = c("patient_alias", "TRA_TRB_aa_dataset_clonotype_id")
+)
+
+clone_abundance_plot_1 = ggplot(clone_abundance_long_1, aes(x = variable, fill =
+                                                              value)) +
+  geom_bar()
+clone_abundance_plot_1
+
+# I choose Relative risk as the measure to use to classify the clones because it represents percent increase or decrease in abundance.
+# I choose cutoffs of 10 (clone_class_2), 20 (clone_class_1) and 50 percent (clone_class_3) change upward or downward to determine the class categories. 
+# The cutoff choice was based on what looked reasonable to me...on second thought I think it will be more suitable to determine the cutoffs by the RR quantiles.
+# but when I first read the assignment I thought that the purpose is to compare between classification method which is 
+# not data driven (in this question) to one that is more data driven (question 4) so it looked right to me given this context...
+# (If I had more time I probably would have changed it to quantile based cutoffs)
+```
+
+```{r}
+#c
+# The desired output is to have persistant outcome. In the later method I suggested - cutoffs which are based on the RR quantiles 
+# it is not expected to give this results because the cutoffs are determined internally from the technical replicated RR's distribution.
+```
+
+```{r}
+#d
+# I would have used generelized linear models (logistic regression) with mixed effects
+```
+
+```{r}
+###### Question 3 ##################
+#a
+clone_abundance_wide$pval <-
+  rank(clone_abundance_wide$RR) / length(clone_abundance_wide$RR)
+
+classify <- function(p1, p2, pval) {
+  if (!is.na(p1) & is.na(p2)) {
+    return("expanding")
+  }
+  else if (is.na(p1) & !is.na(p2)) {
+    return("contracting")
+  }
+  else if (is.na(p1) & is.na(p2)) {
+    return(NA)
+  }
+  else {
+    if (pval < 0.05 & (p1 > p2)) {
+      return("contracting")
+    }
+    else if (pval < 0.05 & (p1 < p2)) {
+      return("expanding")
+    }
+    else if (pval > 0.05) {
+      return("persistent")
+    }
+  }
+}
+
+
+x = apply(clone_abundance_wide[, c("Visit_1_clontype_p", "Visit_2_clontype_p", "pval")], 1,
+          function(y)
+            classify(y['Visit_1_clontype_p'], y['Visit_2_clontype_p'], y['pval']))
+
+clone_abundance_wide$clone_class_4 = x
+```
+
+```{r}
+#b 
+# I divided each RR observation rank by the total number of observations in order to get the cumulative probability 
+# (pvalue) of each observation. The pros of empirical probability is no need to assume underline distribution and the cons
+# are dependence on sample size (the smaller the sample size is, the less accurate the calculated probabilities as opposed
+# to data which we know its distribution and therefore know the probability of each observation's value)
+```
+
+```{r}
+#c
+clone_abundance_long_2 = melt(
+  clone_abundance_wide[c(
+    "patient_alias",
+    "TRA_TRB_aa_dataset_clonotype_id",
+    "clone_class_1",
+    "clone_class_2",
+    "clone_class_3",
+    "clone_class_4"
+  )],
+  id.vars = c("patient_alias", "TRA_TRB_aa_dataset_clonotype_id")
+)
+
+clone_abundance_plot_2 = ggplot(clone_abundance_long_2, aes(x = variable, fill =
+                                                              value)) +
+  geom_bar()
+clone_abundance_plot_2
+
+```
+
